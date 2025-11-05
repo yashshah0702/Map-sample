@@ -1,0 +1,26 @@
+require("dotenv").config();
+
+const SCHEMA = process.env.WENCO_DB_SCHEMA;
+const OEM_EVENT_TRANS = `${SCHEMA}.${process.env.OEM_EVENT_TRANS}`;
+
+const GET_LATEST_SITEMAP_DATA = `
+  WITH RankedEvents AS (
+    SELECT EQUIP_IDENT, OEM_EVENT_MESSAGE, TIMESTAMP,
+           ROW_NUMBER() OVER (PARTITION BY EQUIP_IDENT ORDER BY TIMESTAMP DESC) AS rn
+    FROM ${OEM_EVENT_TRANS}
+    WHERE OEM_EVENT_CONDITION = 'A'
+      AND EQUIP_IDENT LIKE 'TK%'
+      AND CAST(RIGHT(EQUIP_IDENT, 2) AS INT) BETWEEN 1 AND 42
+      AND OEM_EVENT_MESSAGE != 'Maintenance Event'
+  )
+  SELECT EQUIP_IDENT AS [Asset Name],
+         OEM_EVENT_MESSAGE AS [OEM Event Message],
+         FORMAT(TIMESTAMP, 'HH:mm:ss') AS [Event Start Time]
+  FROM RankedEvents
+  WHERE rn = 1
+  ORDER BY TIMESTAMP DESC;
+`;
+
+module.exports = {
+    GET_LATEST_SITEMAP_DATA
+};
