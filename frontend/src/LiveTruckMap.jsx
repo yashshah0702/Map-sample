@@ -1,16 +1,18 @@
 import React, { useEffect, useState } from "react";
 import {
   MapContainer,
-  TileLayer,
   Marker,
-  Popup,
-  Polyline,
-  Rectangle,
   Polygon,
+  Rectangle,
+  Polyline,
+  Popup,
+  Tooltip,
   useMap,
 } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import "leaflet-draw";
+import "leaflet-draw/dist/leaflet.draw.css";
 
 // 🛰️ Convert Web Mercator to Lat/Lng
 function webMercatorToLatLng(x, y) {
@@ -20,262 +22,423 @@ function webMercatorToLatLng(x, y) {
   return [lat, lng];
 }
 
-// 🗺️ Coordinates
+// Map bounds and center
 const southWest = webMercatorToLatLng(16293999.453041892, -2515100.4673742824);
 const northEast = webMercatorToLatLng(16293928.445494454, -2515695.474921722);
+const mapCenter = [
+  (southWest[0] + northEast[0]) / 2,
+  (southWest[1] + northEast[1]) / 2,
+];
 
-function randomLatLng(sw, ne) {
-  // Constrain to a smaller area within bounds to prevent edge cases
-  const buffer = 0.00001; // Small buffer from edges
-  const lat = sw[0] + buffer + Math.random() * (ne[0] - sw[0] - buffer * 2);
-  const lng = sw[1] + buffer + Math.random() * (ne[1] - sw[1] - buffer * 2);
-  return [lat, lng];
-}
-
-function generateCurvedPath(start, end, segments = 5) {
-  const curve = [];
-  for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
-    // Reduce random deviation to keep paths tighter
-    const lat =
-      start[0] + (end[0] - start[0]) * t + (Math.random() - 0.5) * 0.00001;
-    const lng =
-      start[1] + (end[1] - start[1]) * t + (Math.random() - 0.5) * 0.00001;
-    curve.push([lat, lng]);
-  }
-  return curve;
-}
-
-// 🚛 Truck icon
+// Vehicle Icons
 const truckIcon = new L.Icon({
-  iconUrl: "https://cdn-icons-png.flaticon.com/512/1995/1995574.png",
-  iconSize: [35, 35],
-  iconAnchor: [17, 35],
+  iconUrl: "https://raw.github.com/dlolsen5/icons/master/icons8-hauler-100.png",
+  iconSize: [28, 28],
+});
+const excavatorIcon = new L.Icon({
+  iconUrl:
+    "https://img.icons8.com/external-nawicon-outline-color-nawicon/100/external-excavator-construction-nawicon-outline-color-nawicon.png",
+  iconSize: [28, 28],
+});
+const dozerIcon = new L.Icon({
+  iconUrl: "https://raw.github.com/dlolsen5/icons/master/icons8-loader-100.png",
+  iconSize: [28, 28],
 });
 
-// 📍 Location pin icon
-const locationIcon = new L.Icon({
-  iconUrl: "https://cdn-icons-png.flaticon.com/512/2776/2776067.png",
-  iconSize: [35, 35],
-  iconAnchor: [17, 35],
-});
+// Helper functions
+function randomOffsetCoord([lat, lng], spread = 0.02) {
+  const latOffset = (Math.random() - 0.5) * spread;
+  const lngOffset = (Math.random() - 0.5) * spread;
+  return [lat + latOffset, lng + lngOffset];
+}
 
-export default function LiveTruckMap() {
-  const [trucks, setTrucks] = useState([]);
-  const [rectangles, setRectangles] = useState([]);
-  const [lines, setLines] = useState([]);
-  const [triangles, setTriangles] = useState([]);
-  const [locations, setLocations] = useState([]);
+const excavatorStatuses = [
+  "LU Loading",
+  "LU Waiting",
+  "Hauling",
+  "Face Prep",
+  "No Trucks Available",
+  "Maintain Dump",
+  "Meal Break / Crib",
+];
+
+// 🗺️ WMS Layer
+function GeoImageWMS() {
+  const map = useMap();
+  useEffect(() => {
+    const wms = L.tileLayer
+      .wms("https://apollo.geoimage.com.au/erdas-iws/ogc/wms/20217_MtCoolon", {
+        layers: "202509_25to30_MineOps.ecw",
+        format: "image/jpeg",
+        transparent: true,
+        version: "1.1.1",
+        attribution: "© GeoImage",
+        maxZoom: 22,
+      })
+      .addTo(map);
+    return () => map.removeLayer(wms);
+  }, [map]);
+  return null;
+}
+
+// 🧭 Draw Control Component
+function DrawControl() {
+  const map = useMap();
 
   useEffect(() => {
-    const generatedTrucks = Array.from({ length: 7 }, (_, i) => ({
-      id: i + 1,
-      name: `TR0${i + 1}`,
-      position: randomLatLng(southWest, northEast),
-    }));
-    setTrucks(generatedTrucks);
+    const drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
 
-    const generatedRectangles = Array.from({ length: 6 }, () => {
-      const c1 = randomLatLng(southWest, northEast);
-      const c2 = [
-        c1[0] + (Math.random() * (northEast[0] - southWest[0])) / 300, // Smaller rectangles
-        c1[1] + (Math.random() * (northEast[1] - southWest[1])) / 300,
-      ];
-      return [c1, c2];
+    // Create draw toolbar
+    const drawControl = new L.Control.Draw({
+      draw: {
+        polygon: { shapeOptions: { color: "purple" } },
+        rectangle: { shapeOptions: { color: "blue" } },
+        circle: { shapeOptions: { color: "green" } },
+        polyline: { shapeOptions: { color: "orange" } },
+        marker: true,
+        circlemarker: false,
+      },
+      edit: {
+        featureGroup: drawnItems,
+      },
     });
-    setRectangles(generatedRectangles);
+    map.addControl(drawControl);
 
-    const generatedTriangles = Array.from({ length: 4 }, () => {
-      const a = randomLatLng(southWest, northEast);
-      const b = [
-        a[0] + (Math.random() * (northEast[0] - southWest[0])) / 400, // Smaller triangles
-        a[1] + (Math.random() * (northEast[1] - southWest[1])) / 400,
-      ];
-      const c = [
-        a[0] - (Math.random() * (northEast[0] - southWest[0])) / 400,
-        a[1] + (Math.random() * (northEast[1] - southWest[1])) / 400,
-      ];
-      return [a, b, c];
+    // When user finishes drawing
+    map.on(L.Draw.Event.CREATED, (e) => {
+      const layer = e.layer;
+      drawnItems.addLayer(layer);
+
+      let coords = [];
+      if (layer.getLatLngs) {
+        const latlngs = layer.getLatLngs();
+        coords = Array.isArray(latlngs[0])
+          ? latlngs[0].map((pt) => [pt.lat, pt.lng])
+          : [latlngs.lat, latlngs.lng];
+      } else if (layer.getLatLng) {
+        const latlng = layer.getLatLng();
+        coords = [[latlng.lat, latlng.lng]];
+      }
+
+      // Format coordinates
+      const coordText = coords
+        .map((c) => `[${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`)
+        .join("\n");
+
+      // Add tooltip with coordinates
+      layer.bindTooltip(
+        `<div style="font-size:12px; white-space:pre;">${coordText}</div>`,
+        {
+          permanent: true,
+          direction: "top",
+          offset: [0, -10],
+          className: "coord-tooltip",
+        }
+      );
+      layer.openTooltip();
+
+      console.log("🟢 Drawn:", e.layerType, coords);
     });
-    setTriangles(generatedTriangles);
 
-    const generatedLines = Array.from({ length: 6 }, () =>
-      generateCurvedPath(
-        randomLatLng(southWest, northEast),
-        randomLatLng(southWest, northEast)
-      )
-    );
-    setLines(generatedLines);
+    return () => {
+      map.removeControl(drawControl);
+    };
+  }, [map]);
 
-    const generatedLocations = Array.from({ length: 3 }, (_, i) => ({
-      id: i + 1,
-      name: ["Plant Entrance", "Crusher Area", "Loading Zone"][i],
-      position: randomLatLng(southWest, northEast),
-    }));
-    setLocations(generatedLocations);
+  return null;
+}
+
+export default function LiveTruckMap() {
+  const totalTrucks = 30;
+  const totalExcavators = 10;
+  const totalDozers = 10;
+
+  const [vehicles, setVehicles] = useState(() => {
+    const all = [];
+    for (let i = 0; i < totalTrucks; i++) {
+      all.push({
+        id: `TK${i + 1}`,
+        type: "truck",
+        position: randomOffsetCoord(mapCenter, 0.02),
+        status: "Empty",
+        speed: (Math.random() * 30).toFixed(2),
+      });
+    }
+    for (let i = 0; i < totalExcavators; i++) {
+      all.push({
+        id: `EX${i + 1}`,
+        type: "excavator",
+        position: randomOffsetCoord(mapCenter, 0.02),
+        status:
+          excavatorStatuses[
+            Math.floor(Math.random() * excavatorStatuses.length)
+          ],
+      });
+    }
+    for (let i = 0; i < totalDozers; i++) {
+      all.push({
+        id: `DZ${i + 1}`,
+        type: "dozer",
+        position: randomOffsetCoord(mapCenter, 0.02),
+        status: "Maintain Dump",
+      });
+    }
+    return all;
+  });
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setVehicles((prev) =>
+        prev.map((v) => ({
+          ...v,
+          position: randomOffsetCoord(v.position, 0.0015),
+          status:
+            v.type === "excavator"
+              ? excavatorStatuses[
+                  Math.floor(Math.random() * excavatorStatuses.length)
+                ]
+              : v.status,
+        }))
+      );
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
-  // Add GeoImage WMS as a dedicated component so we can use Leaflet's WMS layer
-  function GeoImageWMS() {
-    const map = useMap();
-    useEffect(() => {
-      // Add WMS tile layer (matches the sample HTML you provided)
-      const wms =
-        // L.tileLayer(
-        //   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        //   { attribution: "Tiles © Esri" }
-        // )
-        L.tileLayer
-          .wms(
-            "https://apollo.geoimage.com.au/erdas-iws/ogc/wms/20217_MtCoolon",
-            {
-              layers: "202509_25to30_MineOps.ecw",
-              format: "image/jpeg",
-              transparent: true,
-              version: "1.1.1",
-              attribution: "© GeoImage",
-              maxZoom: 22,
-            }
-          )
-          .addTo(map);
+  const currentTime = new Date().toISOString();
 
-      return () => {
-        if (map && wms) map.removeLayer(wms);
-      };
-    }, [map]);
-    return null;
-  }
+  // Dummy boundaries
+  const polygons = [
+    {
+      color: "green",
+      positions: [
+        [mapCenter[0] + 0.005, mapCenter[1] - 0.008],
+        [mapCenter[0] + 0.003, mapCenter[1] - 0.004],
+        [mapCenter[0] + 0.002, mapCenter[1] - 0.009],
+      ],
+    },
+    {
+      color: "red",
+      positions: [
+        [mapCenter[0] - 0.004, mapCenter[1] + 0.006],
+        [mapCenter[0] - 0.006, mapCenter[1] + 0.009],
+        [mapCenter[0] - 0.009, mapCenter[1] + 0.007],
+        [mapCenter[0] - 0.008, mapCenter[1] + 0.004],
+      ],
+    },
+    {
+      color: "magenta",
+      positions: [
+        [mapCenter[0] + 0.006, mapCenter[1] + 0.004],
+        [mapCenter[0] + 0.007, mapCenter[1] + 0.007],
+        [mapCenter[0] + 0.004, mapCenter[1] + 0.009],
+      ],
+    },
+  ];
 
-  // create simple SVG pin DivIcon to mimic the vector-marker icons
-  const createPinIcon = (color = "#ff8000") =>
-    new L.DivIcon({
-      className: "custom-pin-icon",
-      html: `
-        <svg width="30" height="50" viewBox="0 0 32 52" xmlns="http://www.w3.org/2000/svg">
-          <path d="M16,1 C7.7,1 1,7.66 1,15.865 C1,24.076 16,51 16,51 C16,51 31,24.076 31,15.865 C31,7.656 24.28,1 16,1 Z" fill="${color}" />
-          <circle cx="16" cy="18" r="6" fill="#fff" />
-        </svg>
-      `,
-      iconSize: [30, 50],
-      iconAnchor: [15, 50],
-      popupAnchor: [0, -45],
-    });
+  const rectangles = [
+    {
+      color: "blue",
+      bounds: [
+        [mapCenter[0] + 0.004, mapCenter[1] - 0.005],
+        [mapCenter[0] + 0.002, mapCenter[1] - 0.002],
+      ],
+    },
+    {
+      color: "yellow",
+      bounds: [
+        [mapCenter[0] - 0.006, mapCenter[1] - 0.008],
+        [mapCenter[0] - 0.008, mapCenter[1] - 0.005],
+      ],
+    },
+  ];
 
-  // Move trucks periodically with smooth transitions (commented out to stop movement)
-  /*useEffect(() => {
-    const interval = setInterval(() => {
-      setTrucks((prev) =>
-        prev.map((t) => {
-          const newPos = [
-            t.position[0] + (Math.random() - 0.5) * 0.00001,
-            t.position[1] + (Math.random() - 0.5) * 0.00001,
-          ];
-          // Ensure the new position stays within bounds
-          newPos[0] = Math.max(southWest[0], Math.min(northEast[0], newPos[0]));
-          newPos[1] = Math.max(southWest[1], Math.min(northEast[1], newPos[1]));
-          return {
-            ...t,
-            position: newPos,
-          };
-        })
-      );
-    }, 2000); // More frequent but smaller updates
-    return () => clearInterval(interval);
-  }, []);*/
+  const paths = [
+    {
+      color: "lime",
+      positions: [
+        [mapCenter[0] - 0.006, mapCenter[1] - 0.008],
+        [mapCenter[0], mapCenter[1]],
+        [mapCenter[0] + 0.006, mapCenter[1] + 0.007],
+      ],
+    },
+    {
+      color: "cyan",
+      positions: [
+        [mapCenter[0] - 0.004, mapCenter[1] + 0.006],
+        [mapCenter[0] + 0.003, mapCenter[1] - 0.006],
+      ],
+    },
+  ];
 
   return (
     <div style={{ height: "100vh", width: "100vw" }}>
       <MapContainer
-        bounds={[southWest, northEast]}
-        maxBounds={[southWest, northEast]}
-        maxBoundsViscosity={1.0}
-        zoom={17}
+        center={mapCenter}
+        zoom={15}
+        maxZoom={18}
         style={{ height: "100%", width: "100%" }}
       >
-        {/* 🌍 GeoImage WMS base layer (matches the GeoImage WMS tiles) */}
         <GeoImageWMS />
-
-        {/* 🛣️ Curved Lines */}
-        {lines.map((line, i) => (
-          <Polyline
-            key={i}
-            positions={line}
-            color={
-              [
-                "#00ff00",
-                "#ffff00",
-                "#ff00ff",
-                "#00ffff",
-                "#ffa500",
-                "#0080ff",
-              ][i]
-            }
-            weight={3}
-          />
-        ))}
-
-        {/* 🟩 Rectangles */}
-        {rectangles.map((b, i) => (
-          <Rectangle
-            key={i}
-            bounds={b}
-            color={
-              [
-                "#00ff00",
-                "#ff0000",
-                "#0000ff",
-                "#ffff00",
-                "#ff00ff",
-                "#ffa500",
-              ][i]
-            }
-            weight={2}
-          >
-            <Popup>Zone {i + 1}</Popup>
-          </Rectangle>
-        ))}
-
-        {/* 🔺 Triangles */}
-        {triangles.map((points, i) => (
-          <Polygon
-            key={i}
-            positions={points}
-            color={["#ff007f", "#00ffff", "#ffaa00", "#ff00ff"][i]}
-            weight={2}
-          >
-            <Popup>Triangle {i + 1}</Popup>
-          </Polygon>
-        ))}
-
-        {/* 📍 Locations */}
-        {locations.map((loc) => (
+        <DrawControl /> {/* 🟢 Added drawing tool */}
+        {/* 🟩 Boundaries */}
+        {/* 🆕 Custom Layers */}
+        <Polygon
+          positions={[
+            [-22.018638, 146.381643],
+            [-22.019185, 146.382185],
+            [-22.019697, 146.381477],
+            [-22.01917, 146.380988],
+          ]}
+          color="red"
+        >
+          <Tooltip direction="top">FUEL FARM 2</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.019269, 146.382249],
+            [-22.019846, 146.381471],
+            [-22.02098, 146.382539],
+            [-22.020309, 146.383327],
+          ]}
+          color="green"
+        >
+          <Tooltip direction="top">TOP SERVICE BAY</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.021731, 146.38454],
+            [-22.022298, 146.383858],
+            [-22.023357, 146.384899],
+            [-22.022735, 146.385607],
+          ]}
+          color="orange"
+        >
+          <Tooltip direction="top">TYRE BAY</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.022979, 146.383874],
+            [-22.023536, 146.383182],
+            [-22.024237, 146.383885],
+            [-22.023636, 146.384545],
+          ]}
+          color="#00BFFF" // light blue
+        >
+          <Tooltip direction="top">Wash Pad 02</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.019399, 146.380404],
+            [-22.019871, 146.379706],
+            [-22.022581, 146.382329],
+            [-22.022994, 146.382973],
+            [-22.022561, 146.383456],
+          ]}
+          color="#FFD700" // golden yellow
+        >
+          <Tooltip direction="top">HCABUILDPAD</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.018961, 146.378505],
+            [-22.019289, 146.377657],
+            [-22.024237, 146.381171],
+            [-22.023273, 146.382458],
+          ]}
+          color="orange"
+        >
+          <Tooltip direction="top">Top Soil</Tooltip>
+        </Polygon>
+        {/* 🆕 Dump & Service Layers */}
+        <Polygon
+          positions={[
+            [-22.017146, 146.374562],
+            [-22.019254, 146.372952],
+            [-22.024217, 146.377898],
+            [-22.023302, 146.379679],
+          ]}
+          color="magenta"
+        >
+          <Tooltip direction="top">Dump 01 RL265</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.024168, 146.377754],
+            [-22.024282, 146.377373],
+            [-22.023397, 146.376804],
+            [-22.023118, 146.377024],
+          ]}
+          color="green"
+        >
+          <Tooltip direction="top">DUMP 1 RL260 PADDOCK</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.013227, 146.371579],
+            [-22.014798, 146.370807],
+            [-22.015942, 146.3713],
+            [-22.014639, 146.373103],
+            [-22.013784, 146.37262],
+          ]}
+          color="blue"
+        >
+          <Tooltip direction="top">Top Soil Dump</Tooltip>
+        </Polygon>
+        <Polygon
+          positions={[
+            [-22.023019, 146.372239],
+            [-22.02377, 146.372845],
+            [-22.023476, 146.373215],
+            [-22.022785, 146.372598],
+          ]}
+          color="yellow"
+        >
+          <Tooltip direction="top">HOT_TYRE_BAY</Tooltip>
+        </Polygon>
+        {/* 🚛 Vehicles */}
+        {vehicles.map((v) => (
           <Marker
-            key={loc.id}
-            position={loc.position}
-            icon={createPinIcon("#4080ff")}
+            key={v.id}
+            position={v.position}
+            icon={
+              v.type === "truck"
+                ? truckIcon
+                : v.type === "excavator"
+                ? excavatorIcon
+                : dozerIcon
+            }
           >
-            <Popup>{loc.name}</Popup>
-          </Marker>
-        ))}
-
-        {/* 🚛 Trucks */}
-        {trucks.map((truck) => (
-          <Marker
-            key={truck.id}
-            position={truck.position}
-            icon={createPinIcon("#ff8000")}
-            eventHandlers={{
-              add: (e) => {
-                // Enable smooth transitions on the marker element
-                e.target._icon.style.transition = "transform 0.5s ease-out";
-              },
-            }}
-          >
+            {v.type === "excavator" ? (
+              <Tooltip permanent direction="top" offset={[0, -15]}>
+                <span>
+                  {v.id}:{v.status}
+                </span>
+              </Tooltip>
+            ) : (
+              <Tooltip direction="top" offset={[0, -15]}>
+                <span>
+                  {v.id}:{v.status}
+                </span>
+              </Tooltip>
+            )}
             <Popup>
-              <b>{truck.name}</b>
-              <br />
-              Lat: {truck.position[0].toFixed(5)} <br />
-              Lng: {truck.position[1].toFixed(5)}
+              <div style={{ fontSize: "13px", lineHeight: "1.4em" }}>
+                <b>{v.id}</b>
+                <br />
+                <b>time</b> {currentTime}
+                <br />
+                <b>status</b> {v.status}
+                <br />
+                {v.type === "truck" && (
+                  <>
+                    <b>speed</b> {v.speed} km/h
+                    <br />
+                  </>
+                )}
+                <b>lat, lon</b> {v.position[0].toFixed(6)},{" "}
+                {v.position[1].toFixed(6)}
+              </div>
             </Popup>
           </Marker>
         ))}
